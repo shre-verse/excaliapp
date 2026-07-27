@@ -111,6 +111,21 @@ async function persistPreferences(preferences: Preferences): Promise<void> {
   await invoke('save_preferences', { preferences: prefsToSave })
 }
 
+let preferenceMutationQueue: Promise<void> = Promise.resolve()
+
+function enqueuePreferenceMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const queuedMutation = preferenceMutationQueue
+    .catch(() => undefined)
+    .then(mutation)
+
+  preferenceMutationQueue = queuedMutation.then(
+    () => undefined,
+    () => undefined
+  )
+
+  return queuedMutation
+}
+
 interface AppStore {
   // State
   currentDirectory: string | null
@@ -156,6 +171,7 @@ interface AppStore {
   deleteFolder: (folderPath: string) => Promise<boolean>
   loadPreferences: () => Promise<void>
   savePreferences: () => Promise<void>
+  clearRecentDirectories: () => Promise<void>
   toggleSidebar: () => void
 }
 
@@ -260,24 +276,33 @@ export const useStore = create<AppStore>((set, get) => ({
         openTabs: [],
       })
       
-      // Update preferences with recent directory
-      const prefs = get().preferences
-      // Ensure recentDirectories is always an array
-      const currentRecentDirs = prefs.recentDirectories || []
-      const recentDirs = currentRecentDirs.filter((d) => d !== dir)
-      recentDirs.unshift(dir)
-      if (recentDirs.length > 10) {
-        recentDirs.pop()
+      try {
+        await enqueuePreferenceMutation(async () => {
+          const prefs = get().preferences
+          const currentRecentDirs = prefs.recentDirectories || []
+          const recentDirs = currentRecentDirs.filter((d) => d !== dir)
+          recentDirs.unshift(dir)
+          if (recentDirs.length > 10) {
+            recentDirs.pop()
+          }
+
+          await persistPreferences({
+            ...prefs,
+            lastDirectory: dir,
+            recentDirectories: recentDirs,
+          })
+
+          set((currentState) => ({
+            preferences: {
+              ...currentState.preferences,
+              lastDirectory: dir,
+              recentDirectories: recentDirs,
+            },
+          }))
+        })
+      } catch (error) {
+        console.error('Failed to save recent directory preferences:', error)
       }
-      
-      const newPrefs: Preferences = {
-        ...prefs,
-        lastDirectory: dir,
-        recentDirectories: recentDirs,
-      }
-      
-      set({ preferences: newPrefs })
-      await get().savePreferences()
       
       // Start watching directory
       await invoke('watch_directory', { directory: dir })
@@ -825,11 +850,32 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // Save preferences
   savePreferences: async () => {
-    const { preferences } = get()
     try {
-      await persistPreferences(preferences)
+      await enqueuePreferenceMutation(async () => {
+        await persistPreferences(get().preferences)
+      })
     } catch (error) {
       console.error('Failed to save preferences:', error)
+    }
+  },
+
+  clearRecentDirectories: async () => {
+    try {
+      await enqueuePreferenceMutation(async () => {
+        await persistPreferences({
+          ...get().preferences,
+          recentDirectories: [],
+        })
+
+        set((currentState) => ({
+          preferences: {
+            ...currentState.preferences,
+            recentDirectories: [],
+          },
+        }))
+      })
+    } catch (error) {
+      console.error('Failed to clear recent directories:', error)
     }
   },
 
@@ -867,14 +913,31 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // Toggle decorations
   toggleDecorations: () => {
-    const state = get()
-    const newVisible = !state.preferences.showDecorations
-    invoke('set_decorations', { visible: newVisible })
-      .then(() => {
-        const newPrefs = { ...state.preferences, showDecorations: newVisible }
-        set({ preferences: newPrefs })
-        get().savePreferences()
-      })
+    enqueuePreferenceMutation(async () => {
+      const newVisible = !get().preferences.showDecorations
+      await invoke('set_decorations', { visible: newVisible })
+      try {
+        await persistPreferences({
+          ...get().preferences,
+          showDecorations: newVisible,
+        })
+      } catch (error) {
+        await invoke('set_decorations', { visible: !newVisible }).catch((rollbackError) => {
+          console.error(
+            'Failed to restore window decorations after preference save failure:',
+            rollbackError
+          )
+        })
+        throw error
+      }
+
+      set((currentState) => ({
+        preferences: {
+          ...currentState.preferences,
+          showDecorations: newVisible,
+        },
+      }))
+    })
       .catch((error) => {
         console.error('Failed to toggle window decorations:', error)
         alert(`Failed to toggle window decorations: ${error}`)
@@ -882,21 +945,27 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   toggleTheme: async () => {
-    const state = get()
-    const nextTheme = getNextExplicitTheme(
-      state.preferences.theme,
-      window.matchMedia('(prefers-color-scheme: dark)').matches
-    )
-
-    const newPreferences = {
-      ...state.preferences,
-      theme: nextTheme,
-    }
-
     try {
-      await persistPreferences(newPreferences)
-      set({ preferences: newPreferences })
-      applyDocumentTheme(nextTheme)
+      await enqueuePreferenceMutation(async () => {
+        const state = get()
+        const nextTheme = getNextExplicitTheme(
+          state.preferences.theme,
+          window.matchMedia('(prefers-color-scheme: dark)').matches
+        )
+
+        await persistPreferences({
+          ...state.preferences,
+          theme: nextTheme,
+        })
+
+        set((currentState) => ({
+          preferences: {
+            ...currentState.preferences,
+            theme: nextTheme,
+          },
+        }))
+        applyDocumentTheme(nextTheme)
+      })
     } catch (error) {
       console.error('Failed to toggle theme:', error)
       await message(`Failed to update theme: ${error}`, {

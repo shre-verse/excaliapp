@@ -3,7 +3,6 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useStore } from '../store/useStore'
-import { convertPreferencesToRust } from '../lib/preferences'
 import { promptForName } from '../lib/namePrompt'
 
 interface MenuCommand {
@@ -26,8 +25,7 @@ export function useMenuHandler() {
     saveCurrentFile,
     activeFile,
     toggleSidebar,
-    preferences,
-    savePreferences,
+    clearRecentDirectories,
   } = useStore()
 
   // Use the global reference instead of a local one
@@ -135,8 +133,7 @@ export function useMenuHandler() {
     saveCurrentFile,
     activeFile,
     toggleSidebar,
-    preferences,
-    savePreferences,
+    clearRecentDirectories,
   ])
 
   // File menu handlers
@@ -220,14 +217,7 @@ export function useMenuHandler() {
   }
 
   const handleClearRecent = async () => {
-    const newPrefs = {
-      ...preferences,
-      recentDirectories: [],
-    }
-    // Convert to snake_case for Rust backend
-    const prefsToSave = convertPreferencesToRust(newPrefs)
-    await invoke('save_preferences', { preferences: prefsToSave })
-    useStore.getState().setPreferences(newPrefs)
+    await clearRecentDirectories()
   }
 
 
