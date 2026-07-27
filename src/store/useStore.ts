@@ -158,7 +158,7 @@ interface AppStore {
   toggleTheme: () => Promise<void>
 
   // Async actions
-  loadDirectory: (dir: string) => Promise<void>
+  loadDirectory: (dir: string) => Promise<boolean>
   loadFileTree: (dir: string) => Promise<void>
   loadFile: (file: ExcalidrawFile) => Promise<void>
   loadFileFromTree: (node: FileTreeNode) => Promise<void>
@@ -253,6 +253,7 @@ export const useStore = create<AppStore>((set, get) => ({
   loadDirectory: async (dir) => {
     try {
       const state = get()
+      let preferencesSaved = true
       const [files, fileTree] = await Promise.all([
         invoke<ExcalidrawFile[]>('list_excalidraw_files', { directory: dir }),
         invoke<FileTreeNode[]>('get_file_tree', { directory: dir })
@@ -303,15 +304,18 @@ export const useStore = create<AppStore>((set, get) => ({
           await persistPreferences(nextPreferences)
         })
       } catch (error) {
+        preferencesSaved = false
         console.error('Failed to save recent directory preferences:', error)
       }
       
       // Start watching directory
       await invoke('watch_directory', { directory: dir })
+      return preferencesSaved
     } catch (error) {
       console.error('Failed to load directory:', error)
       // Show user-friendly error message
       alert(`Failed to load directory: ${error}`)
+      return false
     }
   },
 
@@ -817,12 +821,11 @@ export const useStore = create<AppStore>((set, get) => ({
       
       // Auto-load last directory if it exists
       if (safePrefs.lastDirectory) {
-        try {
-          await get().loadDirectory(safePrefs.lastDirectory)
-        } catch (dirError) {
-          console.error('Failed to auto-load last directory:', dirError)
+        const didLoadLastDirectory = await get().loadDirectory(safePrefs.lastDirectory)
+
+        if (!didLoadLastDirectory) {
           // Clear the invalid lastDirectory from preferences
-          const newPrefs = { ...safePrefs, lastDirectory: null }
+          const newPrefs = { ...get().preferences, lastDirectory: null }
           set({ preferences: newPrefs })
           await get().savePreferences()
         }

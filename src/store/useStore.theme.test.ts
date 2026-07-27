@@ -592,9 +592,10 @@ describe('useStore toggleTheme', () => {
     clearSave.resolve()
 
     await clearRecentPromise
-    await loadDirectoryPromise
+    const loadDirectoryResult = await loadDirectoryPromise
     await flushMicrotasks(10)
 
+    expect(loadDirectoryResult).toBe(true)
     expect(useStore.getState().preferences).toEqual(
       expect.objectContaining({
         lastDirectory: 'D:\\work\\new-dir',
@@ -631,8 +632,9 @@ describe('useStore toggleTheme', () => {
     })
 
     try {
-      await useStore.getState().loadDirectory('D:\\work\\loaded')
+      const loadDirectoryResult = await useStore.getState().loadDirectory('D:\\work\\loaded')
 
+      expect(loadDirectoryResult).toBe(false)
       expect(useStore.getState().currentDirectory).toBe('D:\\work\\loaded')
       expect(mockInvoke).toHaveBeenCalledWith('watch_directory', {
         directory: 'D:\\work\\loaded',
@@ -645,6 +647,119 @@ describe('useStore toggleTheme', () => {
     } finally {
       alertSpy.mockRestore()
       consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('clears and persists lastDirectory when startup auto-load fails', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'get_preferences') {
+        return Promise.resolve({
+          last_directory: 'D:\\work\\missing',
+          recent_directories: ['D:\\work\\missing'],
+          theme: 'system',
+          sidebar_visible: true,
+          show_decorations: true,
+        })
+      }
+
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.reject(new Error('missing directory'))
+      }
+
+      if (command === 'save_preferences') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      await useStore.getState().loadPreferences()
+
+      expect(useStore.getState().currentDirectory).toBeNull()
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          lastDirectory: null,
+          recentDirectories: ['D:\\work\\missing'],
+        })
+      )
+      expect(mockInvoke).toHaveBeenCalledWith('save_preferences', {
+        preferences: expect.objectContaining({
+          last_directory: null,
+          recent_directories: ['D:\\work\\missing'],
+        }),
+      })
+      expect(alertSpy).toHaveBeenCalledWith('Failed to load directory: Error: missing directory')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to load directory:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('retains lastDirectory when startup auto-load succeeds', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'get_preferences') {
+        return Promise.resolve({
+          last_directory: 'D:\\work\\loaded',
+          recent_directories: ['D:\\work\\recent'],
+          theme: 'dark',
+          sidebar_visible: true,
+          show_decorations: true,
+        })
+      }
+
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.resolve([])
+      }
+
+      if (command === 'save_preferences') {
+        return Promise.resolve(undefined)
+      }
+
+      if (command === 'watch_directory') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      await useStore.getState().loadPreferences()
+
+      const saveCalls = mockInvoke.mock.calls.filter(([command]) => command === 'save_preferences')
+
+      expect(useStore.getState().currentDirectory).toBe('D:\\work\\loaded')
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          lastDirectory: 'D:\\work\\loaded',
+          recentDirectories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+        })
+      )
+      expect(saveCalls).toHaveLength(1)
+      expect(saveCalls[0]).toEqual([
+        'save_preferences',
+        expect.objectContaining({
+          preferences: expect.objectContaining({
+            last_directory: 'D:\\work\\loaded',
+            recent_directories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+          }),
+        }),
+      ])
+      expect(mockInvoke).toHaveBeenCalledWith('watch_directory', {
+        directory: 'D:\\work\\loaded',
+      })
+      expect(alertSpy).not.toHaveBeenCalled()
+    } finally {
+      alertSpy.mockRestore()
     }
   })
 
