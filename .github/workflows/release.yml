@@ -14,16 +14,11 @@ concurrency:
 
 jobs:
   build-macos:
-    name: Build macOS DMG
+    name: Build unsigned macOS DMG
     runs-on: macos-15
-    environment: release
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-      APP_NAME: ExcaliApp
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_SIGNING_IDENTITY: "Developer ID Application: Tian Chen (${{ secrets.APPLE_TEAM_ID }})"
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      RELEASE_DIR: dist/github-release
 
     steps:
       - name: Check out repository
@@ -51,68 +46,92 @@ jobs:
       - name: Run tests
         run: npm run test:run
 
-      - name: Import Developer ID signing certificate
-        env:
-          DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
-          DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+      - name: Build unsigned Apple Silicon DMG
+        run: npm run tauri -- build --bundles dmg --target aarch64-apple-darwin
+
+      - name: Stage release asset
         run: |
           set -euo pipefail
 
-          KEYCHAIN_PATH="$RUNNER_TEMP/developer-id-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          mkdir -p "$RELEASE_DIR"
+          dmg_path="$(find "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/bundle/dmg" -maxdepth 1 -name "*.dmg" -print -quit)"
+          test -n "$dmg_path"
 
-          test -n "$APPLE_TEAM_ID"
-          test -n "$DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64"
-          test -n "$DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD"
-
-          echo "$DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id-application.p12"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          security import "$RUNNER_TEMP/developer-id-application.p12" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign
-
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          security default-keychain -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-
-      - name: Prepare notarization credentials
-        env:
-          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
-        run: |
-          set -euo pipefail
-
-          test -n "$APPLE_API_KEY_ID"
-          test -n "$APPLE_API_ISSUER"
-          test -n "$APPLE_API_PRIVATE_KEY_BASE64"
-
-          APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          echo "$APPLE_API_PRIVATE_KEY_BASE64" | base64 --decode > "$APPLE_API_KEY_PATH"
-          chmod 600 "$APPLE_API_KEY_PATH"
-          echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH" >> "$GITHUB_ENV"
-
-      - name: Build signed and notarized Apple Silicon DMG
-        run: npm run release:mac -- --notarize
-
-      - name: Stage release assets
-        run: |
-          set -euo pipefail
-
-          mkdir -p dist/github-release
-          find "dist/releases/macos/ExcaliApp-${GITHUB_REF_NAME}" -maxdepth 1 -type f -print -exec cp {} dist/github-release/ \;
+          release_dmg="$RELEASE_DIR/ExcaliApp-${GITHUB_REF_NAME}-macos-arm64-unsigned.dmg"
+          cp "$dmg_path" "$release_dmg"
+          echo "RELEASE_DMG=$release_dmg" >> "$GITHUB_ENV"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
         with:
           name: excaliapp-macos-arm64-dmg
-          path: dist/github-release/*
+          path: ${{ env.RELEASE_DMG }}
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows installers
+    runs-on: windows-2025
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}\src-tauri\target
+      RELEASE_DIR: dist\github-release
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test:run
+
+      - name: Build NSIS and MSI installers
+        run: npm run tauri -- build --bundles nsis,msi --target x86_64-pc-windows-msvc
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:RELEASE_DIR | Out-Null
+
+          $nsisPath = Get-ChildItem "$env:CARGO_TARGET_DIR\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe" |
+            Select-Object -First 1 -ExpandProperty FullName
+          $msiPath = Get-ChildItem "$env:CARGO_TARGET_DIR\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $nsisPath -or -not $msiPath) {
+            throw "Windows installer artifacts were not produced."
+          }
+
+          $releaseExe = "$env:RELEASE_DIR\ExcaliApp-$env:GITHUB_REF_NAME-windows-x64-setup.exe"
+          $releaseMsi = "$env:RELEASE_DIR\ExcaliApp-$env:GITHUB_REF_NAME-windows-x64.msi"
+          Copy-Item $nsisPath $releaseExe
+          Copy-Item $msiPath $releaseMsi
+          "RELEASE_EXE=$releaseExe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_MSI=$releaseMsi" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: excaliapp-windows-x64-installers
+          path: |
+            ${{ env.RELEASE_EXE }}
+            ${{ env.RELEASE_MSI }}
           if-no-files-found: error
 
   build-linux:
@@ -184,6 +203,7 @@ jobs:
     name: Create GitHub Release
     needs:
       - build-macos
+      - build-windows
       - build-linux
     runs-on: ubuntu-24.04
     permissions:
@@ -204,3 +224,7 @@ jobs:
         with:
           files: dist/github-release/*
           generate_release_notes: true
+          body: |
+            ## Installation notes
+
+            The macOS Apple Silicon DMG is unsigned and intended for internal use. macOS may require approval in **System Settings > Privacy & Security** before first launch.
