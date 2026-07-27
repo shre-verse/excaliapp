@@ -269,14 +269,14 @@ export const useStore = create<AppStore>((set, get) => ({
         invoke<FileTreeNode[]>('get_file_tree', { directory: dir })
       ])
 
+      // Start watching before committing the loaded directory to state/preferences.
+      await invoke('watch_directory', { directory: dir })
+
       if (state.presentationMode && state.preferences.showDecorations) {
         await invoke('set_menu_visible', { visible: true }).catch((error) => {
           console.error('Failed to restore menu before loading directory:', error)
         })
       }
-      
-      // Start watching before committing the loaded directory to state/preferences.
-      await invoke('watch_directory', { directory: dir })
 
       set({
         currentDirectory: dir,
@@ -811,17 +811,39 @@ export const useStore = create<AppStore>((set, get) => ({
       const prefs = await invoke<any>('get_preferences')
       
       // Convert snake_case from Rust to camelCase for TypeScript
-      const safePrefs = convertPreferencesFromRust(prefs)
-      
-      set({
-        preferences: safePrefs,
-        sidebarVisible: safePrefs.sidebarVisible,
-      })
+      const loadedPrefs = convertPreferencesFromRust(prefs)
+      let safePrefs = loadedPrefs
 
-      // Apply decorations preference
-      if (safePrefs.showDecorations === false) {
-        invoke('set_decorations', { visible: false })
-      }
+      await enqueuePreferenceMutation(async () => {
+        const initialPrefs = loadedPrefs.showDecorations === false
+          ? {
+              ...loadedPrefs,
+              showDecorations: true,
+            }
+          : loadedPrefs
+
+        safePrefs = initialPrefs
+        set({
+          preferences: initialPrefs,
+          sidebarVisible: initialPrefs.sidebarVisible,
+        })
+
+        if (loadedPrefs.showDecorations === false) {
+          try {
+            await invoke('set_decorations', { visible: false })
+            safePrefs = {
+              ...get().preferences,
+              showDecorations: false,
+            }
+            set({
+              preferences: safePrefs,
+            })
+          } catch (error) {
+            console.error('Failed to apply window decorations preference:', error)
+            alert(`Failed to apply window decorations preference: ${error}`)
+          }
+        }
+      })
 
       applyDocumentTheme(
         getEffectiveTheme(

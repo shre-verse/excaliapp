@@ -880,6 +880,178 @@ describe('useStore toggleTheme', () => {
     }
   })
 
+  it('keeps presentation mode and menu state unchanged when watcher setup fails while loading a directory', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    useStore.setState((state) => ({
+      currentDirectory: 'D:\\work\\current',
+      presentationMode: true,
+      preferences: {
+        ...state.preferences,
+        showDecorations: true,
+      },
+    }))
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.resolve([])
+      }
+
+      if (command === 'watch_directory') {
+        return Promise.reject(new Error('watch failed'))
+      }
+
+      if (command === 'set_menu_visible') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      const loadDirectoryResult = await useStore.getState().loadDirectory('D:\\work\\loaded')
+
+      expect(loadDirectoryResult).toEqual({ status: 'failed' })
+      expect(useStore.getState().currentDirectory).toBe('D:\\work\\current')
+      expect(useStore.getState().presentationMode).toBe(true)
+      expect(mockInvoke.mock.calls.filter(([command]) => command === 'set_menu_visible')).toEqual([])
+      expect(alertSpy).toHaveBeenCalledWith('Failed to load directory: Error: watch failed')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to load directory:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('keeps in-memory decorations aligned and continues startup auto-load when applying undecorated startup preferences fails', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'get_preferences') {
+        return Promise.resolve({
+          last_directory: 'D:\\work\\loaded',
+          recent_directories: ['D:\\work\\recent'],
+          theme: 'dark',
+          sidebar_visible: false,
+          show_decorations: false,
+        })
+      }
+
+      if (command === 'set_decorations') {
+        return Promise.reject(new Error('decorations failed'))
+      }
+
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.resolve([])
+      }
+
+      if (command === 'watch_directory' || command === 'save_preferences') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      await useStore.getState().loadPreferences()
+
+      expect(mockInvoke).toHaveBeenCalledWith('set_decorations', { visible: false })
+      expect(useStore.getState().currentDirectory).toBe('D:\\work\\loaded')
+      expect(useStore.getState().sidebarVisible).toBe(false)
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          lastDirectory: 'D:\\work\\loaded',
+          recentDirectories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+          theme: 'dark',
+          sidebarVisible: false,
+          showDecorations: true,
+        })
+      )
+      expect(mockInvoke).toHaveBeenCalledWith('save_preferences', {
+        preferences: expect.objectContaining({
+          last_directory: 'D:\\work\\loaded',
+          recent_directories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+          sidebar_visible: false,
+          show_decorations: true,
+        }),
+      })
+      expect(mockInvoke).toHaveBeenCalledWith('watch_directory', {
+        directory: 'D:\\work\\loaded',
+      })
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Failed to apply window decorations preference: Error: decorations failed'
+      )
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to apply window decorations preference:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('preserves queued preference mutations while awaiting startup decoration changes', async () => {
+    const decorationChange = createDeferred<void>()
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'get_preferences') {
+        return Promise.resolve({
+          last_directory: null,
+          recent_directories: ['D:\\work\\recent'],
+          theme: 'dark',
+          sidebar_visible: false,
+          show_decorations: false,
+        })
+      }
+
+      if (command === 'set_decorations') {
+        return decorationChange.promise
+      }
+
+      if (command === 'save_preferences') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    const loadPreferencesPromise = useStore.getState().loadPreferences()
+    await flushMicrotasks()
+
+    useStore.setState((state) => ({
+      preferences: {
+        ...state.preferences,
+        theme: 'light',
+      },
+    }))
+    const savePromise = useStore.getState().savePreferences()
+
+    decorationChange.resolve()
+    await loadPreferencesPromise
+    await savePromise
+
+    expect(useStore.getState().preferences).toEqual(
+      expect.objectContaining({
+        theme: 'light',
+        sidebarVisible: false,
+        showDecorations: false,
+      })
+    )
+    expect(mockInvoke).toHaveBeenCalledWith('save_preferences', {
+      preferences: expect.objectContaining({
+        theme: 'light',
+        sidebar_visible: false,
+        show_decorations: false,
+      }),
+    })
+  })
+
   it('returns failed when directory load cannot start watching or read files', async () => {
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
