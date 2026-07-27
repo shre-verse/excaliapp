@@ -4,7 +4,7 @@ import { vi, beforeEach } from 'vitest'
 // Mock Tauri API for tests
 const mockInvoke = vi.fn()
 const mockListen = vi.fn()
-const mockMatchMedia = vi.fn((query: string) => ({
+const createMockMatchMedia = (query: string) => ({
   matches: false,
   media: query,
   query,
@@ -14,7 +14,9 @@ const mockMatchMedia = vi.fn((query: string) => ({
   dispatchEvent: vi.fn(() => false),
   addListener: vi.fn(),
   removeListener: vi.fn(),
-}))
+})
+
+const mockMatchMedia = vi.fn(createMockMatchMedia)
 
 // Mock @tauri-apps/api/core
 vi.mock('@tauri-apps/api/core', () => ({
@@ -57,7 +59,8 @@ value: mockMatchMedia,
 beforeEach(() => {
 mockInvoke.mockReset()
 mockListen.mockReset()
-mockMatchMedia.mockClear()
+mockMatchMedia.mockReset()
+mockMatchMedia.mockImplementation(createMockMatchMedia)
 })
 
 // Export mocks for use in tests
