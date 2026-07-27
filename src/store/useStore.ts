@@ -7,10 +7,12 @@ import {
   LoadDirectoryResult,
   OpenTab,
   Preferences,
+  WorkspaceAccessMode,
 } from '../types'
 import { convertPreferencesFromRust, convertPreferencesToRust } from '../lib/preferences'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { applyDocumentTheme, getEffectiveTheme, getNextExplicitTheme } from '../lib/theme'
+import { getWorkspaceAccessMode, normalizeWorkspaceKey } from '../lib/workspaceAccess'
 
 type UnsavedChangesDecision = 'save' | 'discard' | 'cancel'
 type FileLoadSource = 'cache' | 'disk' | null
@@ -140,6 +142,8 @@ function enqueuePreferenceMutation<T>(mutation: () => Promise<T>): Promise<T> {
 interface AppStore {
   // State
   currentDirectory: string | null
+  currentWorkspaceKey: string | null
+  workspaceAccessMode: WorkspaceAccessMode
   files: ExcalidrawFile[]
   fileTree: FileTreeNode[]
   activeFile: ExcalidrawFile | null
@@ -157,6 +161,7 @@ interface AppStore {
   setFileTree: (tree: FileTreeNode[]) => void
   setActiveFile: (file: ExcalidrawFile | null) => void
   setFileContent: (content: string | null) => void
+  completeSaveAs: (newPath: string, content: string, contentHash: string) => void
   updateTabScene: (filePath: string, scene: CachedExcalidrawScene) => void
   setPreferences: (prefs: Preferences) => void
   setSidebarVisible: (visible: boolean) => void
@@ -167,13 +172,15 @@ interface AppStore {
   closeTab: (filePath: string) => Promise<void>
   toggleDecorations: () => void
   toggleTheme: () => Promise<void>
+  setWorkspaceAccessMode: (mode: WorkspaceAccessMode) => Promise<void>
+  requireEditableWorkspace: (action: string) => Promise<boolean>
 
   // Async actions
   loadDirectory: (dir: string) => Promise<LoadDirectoryResult>
   loadFileTree: (dir: string) => Promise<void>
   loadFile: (file: ExcalidrawFile) => Promise<void>
   loadFileFromTree: (node: FileTreeNode) => Promise<void>
-  saveCurrentFile: (content?: string) => Promise<void>
+  saveCurrentFile: (content?: string) => Promise<boolean>
   createNewFile: (fileName?: string, directory?: string) => Promise<void>
   createNewFolder: (folderName?: string, directory?: string) => Promise<void>
   renameFile: (oldPath: string, newName: string) => Promise<void>
@@ -189,6 +196,8 @@ interface AppStore {
 export const useStore = create<AppStore>((set, get) => ({
   // Initial state
   currentDirectory: null,
+  currentWorkspaceKey: null,
+  workspaceAccessMode: 'read-only',
   files: [],
   fileTree: [],
   activeFile: null,
@@ -200,6 +209,7 @@ export const useStore = create<AppStore>((set, get) => ({
     theme: 'system',
     sidebarVisible: true,
     showDecorations: true,
+    workspaceAccess: {},
   },
   sidebarVisible: true,
   isDirty: false,
@@ -222,6 +232,36 @@ export const useStore = create<AppStore>((set, get) => ({
           )
         : state.openTabs,
   })),
+  completeSaveAs: (newPath, content, contentHash) => set((state) => {
+    const oldPath = state.activeFile?.path
+    if (!oldPath) {
+      return state
+    }
+
+    const name = fileNameFromPath(newPath)
+    const activeFile = { name, path: newPath, modified: false }
+    const existingTab = state.openTabs.find((tab) => tab.path === oldPath)
+    const updatedTab = existingTab
+      ? {
+          ...existingTab,
+          name,
+          path: newPath,
+          modified: false,
+          cachedContent: content,
+          contentHash,
+        }
+      : toOpenTab(activeFile, content, contentHash)
+
+    return {
+      activeFile,
+      fileContent: content,
+      activeFileLoadSource: 'disk',
+      isDirty: false,
+      openTabs: existingTab
+        ? state.openTabs.map((tab) => (tab.path === oldPath ? updatedTab : tab))
+        : [...state.openTabs, updatedTab],
+    }
+  }),
   updateTabScene: (filePath, scene) => set((state) => ({
     openTabs: state.openTabs.map((tab) =>
       tab.path === filePath ? { ...tab, cachedScene: scene } : tab
@@ -271,6 +311,11 @@ export const useStore = create<AppStore>((set, get) => ({
 
       // Start watching before committing the loaded directory to state/preferences.
       await invoke('watch_directory', { directory: dir })
+      const workspaceKey = normalizeWorkspaceKey(dir)
+      const workspaceAccessMode = getWorkspaceAccessMode(
+        get().preferences.workspaceAccess,
+        workspaceKey
+      )
 
       if (state.presentationMode && state.preferences.showDecorations) {
         await invoke('set_menu_visible', { visible: true }).catch((error) => {
@@ -280,6 +325,8 @@ export const useStore = create<AppStore>((set, get) => ({
 
       set({
         currentDirectory: dir,
+        currentWorkspaceKey: workspaceKey,
+        workspaceAccessMode,
         files,
         fileTree,
         activeFile: null,
@@ -357,7 +404,9 @@ export const useStore = create<AppStore>((set, get) => ({
       const decision = await confirmUnsavedChanges(state.activeFile.name, 'switching files')
       
       if (decision === 'save') {
-        await state.saveCurrentFile()
+        if (!(await state.saveCurrentFile())) {
+          return
+        }
       } else if (decision === 'cancel') {
         return
       } else {
@@ -468,20 +517,23 @@ export const useStore = create<AppStore>((set, get) => ({
   // Save current file
   saveCurrentFile: async (content) => {
     const state = get()
+    if (!(await state.requireEditableWorkspace('save files'))) {
+      return false
+    }
     const { activeFile, fileContent, isDirty } = state
     
     if (!activeFile) {
-      return
+      return true
     }
     
     // Only save if file is dirty
     if (!isDirty && !content) {
-      return
+      return true
     }
     
     const contentToSave = content || fileContent
     if (!contentToSave) {
-      return
+      return false
     }
     
     // Validate JSON before saving
@@ -489,23 +541,19 @@ export const useStore = create<AppStore>((set, get) => ({
       const parsed = JSON.parse(contentToSave)
       if (!parsed || typeof parsed !== 'object') {
         console.error('[saveCurrentFile] Invalid JSON structure')
-        return
+        return false
       }
       
-      // Don't save if it's an empty Excalidraw file (no elements)
-      if (Array.isArray(parsed.elements) && parsed.elements.length === 0 && !content) {
-        // Only skip if this is an auto-save (no explicit content provided)
-        return
-      }
     } catch (jsonError) {
       console.error('[saveCurrentFile] Invalid JSON, not saving:', jsonError)
-      return
+      return false
     }
     
     try {
       const contentHash = await invoke<string>('save_file', {
         filePath: activeFile.path,
         content: contentToSave,
+        expectedHash: state.openTabs.find((tab) => tab.path === activeFile.path)?.contentHash || '',
       })
       
       state.markFileAsModified(activeFile.path, false)
@@ -524,9 +572,19 @@ export const useStore = create<AppStore>((set, get) => ({
             : tab
         ),
       }))
+      return true
     } catch (error) {
       console.error('[saveCurrentFile] Failed to save file:', error)
-      alert(`Failed to save file: ${error}`)
+      const errorMessage = String(error)
+      if (errorMessage.includes('FILE_CONFLICT:')) {
+        alert(
+          'This file changed on disk after it was opened. Your local changes were not overwritten. ' +
+          'Reload the file or save a copy before continuing.'
+        )
+      } else {
+        alert(`Failed to save file: ${error}`)
+      }
+      return false
     }
   },
 
@@ -540,7 +598,9 @@ export const useStore = create<AppStore>((set, get) => ({
       const decision = await confirmUnsavedChanges(state.activeFile.name, 'creating a new file')
       
       if (decision === 'save') {
-        await state.saveCurrentFile()
+        if (!(await state.saveCurrentFile())) {
+          return
+        }
       } else if (decision === 'cancel') {
         return
       } else {
@@ -578,14 +638,23 @@ export const useStore = create<AppStore>((set, get) => ({
         if (!dir) {
           return
         }
+
         // Load the selected directory
-        await state.loadDirectory(dir)
+        const result = await state.loadDirectory(dir)
+        if (result.status === 'failed') {
+          return
+        }
         currentDirectory = dir
       } catch (error) {
         console.error('Failed to select directory:', error)
         alert(`Failed to select directory: ${error}`)
         return
       }
+
+    }
+
+    if (!(await get().requireEditableWorkspace('create files'))) {
+      return
     }
     
     // Generate default filename if not provided
@@ -633,14 +702,23 @@ export const useStore = create<AppStore>((set, get) => ({
         if (!dir) {
           return
         }
+
         // Load the selected directory
-        await state.loadDirectory(dir)
+        const result = await state.loadDirectory(dir)
+        if (result.status === 'failed') {
+          return
+        }
         currentDirectory = dir
       } catch (error) {
         console.error('[createNewFolder] Failed to select directory:', error)
         alert(`Failed to select directory: ${error}`)
         return
       }
+
+    }
+
+    if (!(await get().requireEditableWorkspace('create folders'))) {
+      return
     }
 
     // Generate default folder name if not provided
@@ -663,6 +741,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // Rename file
   renameFile: async (oldPath, newName) => {
+    if (!(await get().requireEditableWorkspace('rename files'))) {
+      return
+    }
     try {
       // Ensure the new name has .excalidraw extension
       const finalName = newName.endsWith('.excalidraw') 
@@ -700,6 +781,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // Rename folder
   renameFolder: async (oldPath, newName) => {
+    if (!(await get().requireEditableWorkspace('rename folders'))) {
+      return
+    }
     try {
       const newPath = await invoke<string>('rename_folder', {
         oldPath,
@@ -745,6 +829,9 @@ export const useStore = create<AppStore>((set, get) => ({
   // Delete file
   // NOTE: Confirmation should be handled by the caller
   deleteFile: async (filePath) => {
+    if (!(await get().requireEditableWorkspace('delete files'))) {
+      return false
+    }
     try {
       await invoke('delete_file', { filePath })
       const state = get()
@@ -776,6 +863,9 @@ export const useStore = create<AppStore>((set, get) => ({
   // Delete folder
   // NOTE: Confirmation should be handled by the caller
   deleteFolder: async (folderPath) => {
+    if (!(await get().requireEditableWorkspace('delete folders'))) {
+      return false
+    }
     try {
       await invoke('delete_folder', { folderPath })
       const state = get()
@@ -872,6 +962,7 @@ export const useStore = create<AppStore>((set, get) => ({
         theme: 'system',
         sidebarVisible: true,
         showDecorations: true,
+        workspaceAccess: {},
       }
       set({
         preferences: defaultPrefs,
@@ -1036,6 +1127,103 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
+  requireEditableWorkspace: async (action) => {
+    if (!get().currentDirectory || get().workspaceAccessMode === 'editable') {
+      return true
+    }
+
+    await message(`This workspace is read-only. Enable editing before you ${action}.`, {
+      title: 'Read Only Workspace',
+      kind: 'info',
+    })
+    return false
+  },
+
+  setWorkspaceAccessMode: async (mode) => {
+    const state = get()
+    const workspaceKey = state.currentWorkspaceKey
+    if (!workspaceKey || mode === state.workspaceAccessMode) {
+      return
+    }
+
+    if (mode === 'editable') {
+      const confirmed = await ask(
+        'Enable editing for this workspace on this machine?\n\nFor OneDrive-backed folders, normally edit from only one machine at a time.',
+        {
+          title: 'Enable Workspace Editing',
+          kind: 'warning',
+          okLabel: 'Enable Editing',
+          cancelLabel: 'Keep Read Only',
+        }
+      )
+      if (!confirmed) {
+        return
+      }
+    } else if (state.isDirty && state.activeFile) {
+      const decision = await confirmUnsavedChanges(
+        state.activeFile.name,
+        'switching this workspace to read-only'
+      )
+      if (decision === 'cancel') {
+        return
+      }
+      if (decision === 'save') {
+        if (!(await state.saveCurrentFile())) {
+          return
+        }
+        if (get().isDirty) {
+          return
+        }
+      } else {
+        try {
+          const currentTab = state.openTabs.find((tab) => tab.path === state.activeFile?.path)
+          const cleanTab = await readOpenTabFromDisk(
+            state.activeFile,
+            (currentTab?.sceneVersion || 0) + 1
+          )
+          set((currentState) => ({
+            activeFile: toExcalidrawFile(cleanTab),
+            fileContent: cleanTab.cachedContent,
+            activeFileLoadSource: 'disk',
+            isDirty: false,
+            openTabs: currentState.openTabs.map((tab) =>
+              tab.path === cleanTab.path ? cleanTab : tab
+            ),
+          }))
+        } catch (error) {
+          await message(`Failed to discard changes: ${error}`, {
+            title: 'Error',
+            kind: 'error',
+          })
+          return
+        }
+      }
+    }
+
+    try {
+      await enqueuePreferenceMutation(async () => {
+        const latest = get()
+        const nextPreferences: Preferences = {
+          ...latest.preferences,
+          workspaceAccess: {
+            ...latest.preferences.workspaceAccess,
+            [workspaceKey]: mode,
+          },
+        }
+        await persistPreferences(nextPreferences)
+        set({
+          preferences: nextPreferences,
+          workspaceAccessMode: mode,
+        })
+      })
+    } catch (error) {
+      await message(`Failed to update workspace access: ${error}`, {
+        title: 'Error',
+        kind: 'error',
+      })
+    }
+  },
+
   // Close tab
   closeTab: async (filePath) => {
     const state = get()
@@ -1049,7 +1237,9 @@ export const useStore = create<AppStore>((set, get) => ({
       const decision = await confirmUnsavedChanges(tab.name, 'closing')
 
       if (decision === 'save') {
-        await state.saveCurrentFile()
+        if (!(await state.saveCurrentFile())) {
+          return
+        }
       } else if (decision === 'cancel') {
         return
       } else {

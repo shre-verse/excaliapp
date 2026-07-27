@@ -10,6 +10,11 @@ interface MenuCommand {
   data?: any
 }
 
+interface FileContentResult {
+  content: string
+  content_hash: string
+}
+
 // Singleton to store the Excalidraw API reference
 let globalExcalidrawAPI: any = null
 
@@ -199,6 +204,9 @@ export function useMenuHandler() {
 
     // Get the current content from the store
     const state = useStore.getState()
+    if (!(await state.requireEditableWorkspace('save files as'))) {
+      return
+    }
     const content = state.fileContent
     
     if (!content) return
@@ -208,11 +216,14 @@ export function useMenuHandler() {
     })
 
     if (newPath) {
-      useStore.getState().setActiveFile({
-        name: newPath.split('/').pop() ?? activeFile.name,
-        path: newPath,
-        modified: false,
+      const savedFile = await invoke<FileContentResult>('read_file_with_hash', {
+        filePath: newPath,
       })
+      useStore.getState().completeSaveAs(
+        newPath,
+        savedFile.content,
+        savedFile.content_hash
+      )
     }
   }
 

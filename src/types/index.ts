@@ -17,6 +17,8 @@ export interface OpenTab extends ExcalidrawFile {
   sceneVersion: number
 }
 
+export type WorkspaceAccessMode = 'read-only' | 'editable'
+
 export interface FileTreeNode {
   name: string
   path: string
@@ -38,6 +40,7 @@ export interface Preferences {
   theme: 'light' | 'dark' | 'system'
   sidebarVisible: boolean
   showDecorations: boolean
+  workspaceAccess: Record<string, WorkspaceAccessMode>
 }
 
 export type LoadDirectoryResult =

@@ -14,6 +14,7 @@ export function convertPreferencesFromRust(rustPrefs: any): Preferences {
     showDecorations: rustPrefs?.show_decorations !== undefined
       ? rustPrefs.show_decorations
       : (rustPrefs?.showDecorations !== undefined ? rustPrefs.showDecorations : true),
+    workspaceAccess: rustPrefs?.workspace_access || rustPrefs?.workspaceAccess || {},
   }
 }
 
@@ -27,5 +28,6 @@ export function convertPreferencesToRust(tsPrefs: Preferences): any {
     theme: tsPrefs.theme || 'system',
     sidebar_visible: tsPrefs.sidebarVisible !== undefined ? tsPrefs.sidebarVisible : true,
     show_decorations: tsPrefs.showDecorations !== undefined ? tsPrefs.showDecorations : true,
+    workspace_access: tsPrefs.workspaceAccess || {},
   }
 }

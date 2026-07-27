@@ -34,15 +34,19 @@ function App() {
       // Reload the directory to refresh file list
       const state = useStore.getState()
       await state.loadFileTree(currentDirectory)
+      const refreshedState = useStore.getState()
       
       // If the active file was deleted, clear it
-      if (state.activeFile) {
-        const fileStillExists = containsFilePath(state.fileTree, state.activeFile.path)
+      if (refreshedState.activeFile) {
+        const fileStillExists = containsFilePath(
+          refreshedState.fileTree,
+          refreshedState.activeFile.path
+        )
         
         if (!fileStillExists) {
-          state.setActiveFile(null)
-          state.setFileContent(null)
-          state.setIsDirty(false)
+          refreshedState.setActiveFile(null)
+          refreshedState.setFileContent(null)
+          refreshedState.setIsDirty(false)
         }
       }
     })
@@ -64,8 +68,9 @@ function App() {
         })
         
         if (shouldSave) {
-          await saveCurrentFile()
-          await invoke('force_close_app')
+          if (await saveCurrentFile()) {
+            await invoke('force_close_app')
+          }
         } else {
           const reallyClose = await ask('Close without saving your changes?', {
             title: 'Confirm Close',

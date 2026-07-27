@@ -1,10 +1,11 @@
 import { ScrollArea } from '@radix-ui/react-scroll-area'
-import { FolderOpen, Plus, FolderPlus } from 'lucide-react'
+import { FolderOpen, Plus, FolderPlus, Lock, Moon, Sun, Unlock } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { TreeView } from './TreeView'
 import { FileTreeNode } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { promptForName } from '../lib/namePrompt'
+import { getEffectiveTheme } from '../lib/theme'
 
 function countFilesInTree(nodes: FileTreeNode[]): number {
   let count = 0
@@ -27,7 +28,17 @@ export function Sidebar() {
     loadFileFromTree,
     createNewFile,
     createNewFolder,
+    workspaceAccessMode,
+    setWorkspaceAccessMode,
+    preferences,
+    toggleTheme,
   } = useStore()
+  const readOnly = workspaceAccessMode === 'read-only'
+  const mutationsDisabled = Boolean(currentDirectory) && readOnly
+  const effectiveTheme = getEffectiveTheme(
+    preferences.theme,
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  )
 
   const handleSelectDirectory = async () => {
     const dir = await invoke<string | null>('select_directory')
@@ -96,8 +107,9 @@ export function Sidebar() {
         
         <button
           onClick={handleNewFile}
-          className="sidebar-action w-full mt-2 flex items-center gap-2 px-3 py-2 rounded-md transition-colors"
-          title={!currentDirectory ? 'Select a directory first' : 'Create a new Excalidraw file'}
+          disabled={mutationsDisabled}
+          className="sidebar-action w-full mt-2 flex items-center gap-2 px-3 py-2 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title={readOnly ? 'Enable editing to create files' : (!currentDirectory ? 'Select a directory first' : 'Create a new Excalidraw file')}
         >
           <Plus className="w-4 h-4" />
           <span className="text-sm">New File</span>
@@ -105,12 +117,29 @@ export function Sidebar() {
 
         <button
           onClick={handleNewFolder}
-          className="sidebar-action w-full mt-2 flex items-center gap-2 px-3 py-2 rounded-md transition-colors"
-          title={!currentDirectory ? 'Select a directory first' : 'Create a new folder'}
+          disabled={mutationsDisabled}
+          className="sidebar-action w-full mt-2 flex items-center gap-2 px-3 py-2 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title={readOnly ? 'Enable editing to create folders' : (!currentDirectory ? 'Select a directory first' : 'Create a new folder')}
         >
           <FolderPlus className="w-4 h-4" />
           <span className="text-sm">New Folder</span>
         </button>
+
+        {currentDirectory && (
+          <div className="mt-3 rounded-md border p-2">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              {readOnly ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              <span>{readOnly ? 'Read Only' : 'Editing Enabled'}</span>
+            </div>
+            <button
+              onClick={() => setWorkspaceAccessMode(readOnly ? 'editable' : 'read-only')}
+              className="sidebar-action w-full mt-2 px-2 py-1.5 rounded-md text-xs"
+              aria-label={readOnly ? 'Enable Editing' : 'Switch to Read Only'}
+            >
+              {readOnly ? 'Enable Editing' : 'Switch to Read Only'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* File Tree */}
@@ -131,10 +160,20 @@ export function Sidebar() {
       </ScrollArea>
 
       {/* Footer */}
-      <div className="sidebar-section p-3 border-t">
+      <div className="sidebar-section p-3 border-t flex items-center justify-between gap-2">
         <div className="sidebar-muted text-xs">
           {countFilesInTree(fileTree)} file{countFilesInTree(fileTree) !== 1 ? 's' : ''}
         </div>
+        <button
+          onClick={toggleTheme}
+          className="sidebar-action p-2 rounded-md"
+          aria-label={effectiveTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={`${effectiveTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} (Shift+Alt+D)`}
+        >
+          {effectiveTheme === 'dark'
+            ? <Sun className="w-4 h-4" />
+            : <Moon className="w-4 h-4" />}
+        </button>
       </div>
     </div>
   )

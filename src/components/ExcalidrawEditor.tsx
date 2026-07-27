@@ -14,9 +14,10 @@ interface EditorPaneProps {
   isActive: boolean
   presentationMode: boolean
   theme: 'light' | 'dark'
+  readOnly: boolean
 }
 
-function EditorPane({ tab, isActive, presentationMode, theme }: EditorPaneProps) {
+function EditorPane({ tab, isActive, presentationMode, theme, readOnly }: EditorPaneProps) {
   const [isReady, setIsReady] = useState(false)
   const excalidrawAPIRef = useRef<any>(null)
   const initialLoadCompleteRef = useRef(false)
@@ -126,7 +127,7 @@ function EditorPane({ tab, isActive, presentationMode, theme }: EditorPaneProps)
     appState: ExcalidrawAppState,
     files: any
   ) => {
-    if (!isActive || !isUserChangeRef.current || !initialLoadCompleteRef.current) {
+    if (readOnly || !isActive || !isUserChangeRef.current || !initialLoadCompleteRef.current) {
       lastSavedElementsRef.current = JSON.stringify(elements || [])
       return
     }
@@ -175,7 +176,7 @@ function EditorPane({ tab, isActive, presentationMode, theme }: EditorPaneProps)
     if (freshStore.activeFile?.path === tab.path) {
       freshStore.setFileContent(newContent)
     }
-  }, [isActive, tab.path])
+  }, [isActive, readOnly, tab.path])
 
   return (
     <div
@@ -193,7 +194,7 @@ function EditorPane({ tab, isActive, presentationMode, theme }: EditorPaneProps)
         }}
         onChange={handleChange}
         theme={theme}
-        viewModeEnabled={presentationMode}
+        viewModeEnabled={presentationMode || readOnly}
         UIOptions={{
           canvasActions: {
             loadScene: false,
@@ -221,6 +222,7 @@ export function ExcalidrawEditor() {
   const activeFile = useStore(state => state.activeFile)
   const openTabs = useStore(state => state.openTabs)
   const presentationMode = useStore(state => state.presentationMode)
+  const readOnly = useStore(state => state.workspaceAccessMode === 'read-only')
   const preferenceTheme = useStore(state => state.preferences.theme)
   const theme = getEffectiveTheme(
     preferenceTheme,
@@ -247,6 +249,7 @@ export function ExcalidrawEditor() {
           isActive={activeFile.path === tab.path}
           presentationMode={presentationMode}
           theme={theme}
+          readOnly={readOnly}
         />
       ))}
     </div>

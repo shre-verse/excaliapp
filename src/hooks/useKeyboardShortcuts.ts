@@ -15,6 +15,7 @@ export function useKeyboardShortcuts() {
     togglePresentationMode,
     closeTab,
     toggleDecorations,
+    toggleTheme,
   } = useStore()
 
   useEffect(() => {
@@ -25,6 +26,12 @@ export function useKeyboardShortcuts() {
       // Don't handle any events if clipboard operations are being used
       // Let Excalidraw handle all clipboard operations natively
       if (modKey && (e.key === 'c' || e.key === 'v' || e.key === 'x' || e.key === 'a')) {
+        return
+      }
+
+      if (e.altKey && e.shiftKey && e.code === 'KeyD') {
+        e.preventDefault()
+        await toggleTheme()
         return
       }
 
@@ -153,5 +160,5 @@ export function useKeyboardShortcuts() {
     // Use non-capturing phase to let Excalidraw handle events first
     window.addEventListener('keydown', handleKeyDown, false)
     return () => window.removeEventListener('keydown', handleKeyDown, false)
-  }, [toggleSidebar, saveCurrentFile, openTabs, activeFile, loadFile, createNewFile, createNewFolder, togglePresentationMode, closeTab, toggleDecorations])
+  }, [toggleSidebar, saveCurrentFile, openTabs, activeFile, loadFile, createNewFile, createNewFolder, togglePresentationMode, closeTab, toggleDecorations, toggleTheme])
 }

@@ -69,6 +69,7 @@ describe('useStore toggleTheme', () => {
         theme: 'dark',
         sidebar_visible: false,
         show_decorations: false,
+        workspace_access: {},
       },
     })
   })
@@ -88,6 +89,7 @@ describe('useStore toggleTheme', () => {
         theme: 'light',
         sidebar_visible: false,
         show_decorations: false,
+        workspace_access: {},
       },
     })
   })

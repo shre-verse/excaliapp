@@ -16,6 +16,8 @@ A free, open-source desktop application for managing and editing local Excalidra
 - 🌓 **Theme Support**: Light, dark, and system theme options with full dark mode UI
 - 🖥️ **Chromeless Mode**: Hide title bar and menus for a distraction-free experience
 - 🔒 **Security First**: Path validation and content sanitization for safe file operations
+- 👁️ **Read-Only Workspaces**: New workspaces open read-only on each machine until editing is explicitly enabled
+- 🌗 **Global Theme Toggle**: Switch the full app and every open canvas with the sidebar button or Shift+Alt+D
 
 ## Installation
 
@@ -111,6 +113,8 @@ The built application will be in `src-tauri/target/release/bundle/`
 - **Rename**: Right-click on a file and select "Rename"
 - **Delete**: Right-click on a file and select "Delete"
 - **Auto-save**: Files are automatically saved every 30 seconds and when switching between files
+- **Workspace access**: Each directory opens read-only by default on a machine. Use **Enable Editing** in the sidebar when that machine should write to the workspace.
+- **Conflict protection**: Saves are rejected when the file changed on disk after it was opened, preserving local dirty state instead of overwriting the newer file.
 
 ### Presentation Mode
 

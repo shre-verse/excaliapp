@@ -4,9 +4,12 @@ mod security;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+use fs2::FileExt;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExcalidrawFile {
@@ -38,6 +41,8 @@ pub struct Preferences {
     pub sidebar_visible: bool,
     #[serde(default = "default_true")]
     pub show_decorations: bool,
+    #[serde(default)]
+    pub workspace_access: HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -52,6 +57,7 @@ impl Default for Preferences {
             theme: "system".to_string(),
             sidebar_visible: true,
             show_decorations: true,
+            workspace_access: HashMap::new(),
         }
     }
 }
@@ -59,6 +65,7 @@ impl Default for Preferences {
 pub struct AppState {
     pub current_directory: Mutex<Option<PathBuf>>,
     pub modified_files: Mutex<Vec<String>>,
+    pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
 #[tauri::command]
@@ -243,6 +250,54 @@ fn blake3_hash(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
 }
 
+fn write_if_hash_matches(
+    path: &Path,
+    content: &str,
+    expected_hash: &str,
+) -> Result<String, String> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let mut current_content = String::new();
+    file.read_to_string(&mut current_content)
+        .map_err(|e| e.to_string())?;
+    let current_hash = blake3_hash(&current_content);
+    if current_hash != expected_hash {
+        return Err(format!("FILE_CONFLICT:{current_hash}"));
+    }
+
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    file.set_len(0).map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    file.unlock().map_err(|e| e.to_string())?;
+    Ok(blake3_hash(content))
+}
+
+fn create_new_excalidraw_file(path: &Path, content: &str) -> Result<(), String> {
+    security::validate_excalidraw_file(path)?;
+    security::validate_excalidraw_content(content)?;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+fn should_emit_change_for_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "excalidraw")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreferencesRollbackAction {
     Restore(serde_json::Value),
@@ -259,7 +314,11 @@ fn preferences_rollback_action(
 }
 
 #[tauri::command]
-async fn save_file(file_path: String, content: String) -> Result<String, String> {
+async fn save_file(
+    file_path: String,
+    content: String,
+    expected_hash: String,
+) -> Result<String, String> {
     // Validate path to prevent traversal attacks
     let path = Path::new(&file_path);
     let validated_path = security::validate_path(path, None)?;
@@ -270,11 +329,7 @@ async fn save_file(file_path: String, content: String) -> Result<String, String>
     // Validate the content before saving
     security::validate_excalidraw_content(&content)?;
 
-    fs::write(&validated_path, content).map_err(|e| e.to_string())?;
-
-    let saved_content = fs::read_to_string(&validated_path).map_err(|e| e.to_string())?;
-
-    Ok(blake3_hash(&saved_content))
+    write_if_hash_matches(&validated_path, &content, &expected_hash)
 }
 
 #[tauri::command]
@@ -295,7 +350,7 @@ async fn save_file_as(app: AppHandle, content: String) -> Result<Option<String>,
     match rx.recv() {
         Ok(Some(path)) => {
             let path_str = path.to_string();
-            match fs::write(&path_str, content) {
+            match create_new_excalidraw_file(Path::new(&path_str), &content) {
                 Ok(_) => Ok(Some(path_str)),
                 Err(e) => Err(e.to_string()),
             }
@@ -652,42 +707,31 @@ async fn watch_directory(
         *current_dir = Some(path.clone());
     }
 
-    // Set up file watcher
     let app_handle = app.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    let mut watcher = notify::recommended_watcher(tx).map_err(|e| e.to_string())?;
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
+        match result {
+            Ok(Event {
+                kind: EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_),
+                paths,
+                ..
+            }) => {
+                for changed_path in paths {
+                    if should_emit_change_for_path(&changed_path) {
+                        let _ = app_handle.emit("file-system-change", &changed_path);
+                    }
+                }
+            }
+            Err(error) => eprintln!("Watch error: {error:?}"),
+            _ => {}
+        }
+    })
+    .map_err(|e| e.to_string())?;
 
     watcher
         .watch(&path, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
 
-    // Spawn a thread to handle file system events
-    std::thread::spawn(move || {
-        loop {
-            match rx.recv() {
-                Ok(Ok(Event {
-                    kind: EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_),
-                    paths,
-                    ..
-                })) => {
-                    for path in paths {
-                        if let Some(extension) = path.extension() {
-                            if extension == "excalidraw" {
-                                let _ = app_handle.emit("file-system-change", &path);
-                            }
-                        }
-                    }
-                }
-                Ok(Err(e)) => eprintln!("Watch error: {:?}", e),
-                Err(e) => {
-                    eprintln!("Watch channel error: {:?}", e);
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
+    *state.watcher.lock().unwrap() = Some(watcher);
 
     Ok(())
 }
@@ -703,6 +747,7 @@ pub fn run() {
             app.manage(AppState {
                 current_directory: Mutex::new(None),
                 modified_files: Mutex::new(Vec::new()),
+                watcher: Mutex::new(None),
             });
 
             // Create and set up the menu
@@ -765,4 +810,54 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("excaliapp-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        directory.join("drawing.excalidraw")
+    }
+
+    #[test]
+    fn rejects_save_when_disk_hash_changed() {
+        let path = temp_file();
+        fs::write(&path, "newer disk content").unwrap();
+
+        let result = write_if_hash_matches(&path, "local content", "stale-hash");
+
+        assert!(result.unwrap_err().starts_with("FILE_CONFLICT:"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "newer disk content");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn only_emits_watcher_events_for_excalidraw_files() {
+        assert!(should_emit_change_for_path(Path::new("drawing.excalidraw")));
+        assert!(!should_emit_change_for_path(Path::new("notes.txt")));
+        assert!(!should_emit_change_for_path(Path::new("folder")));
+    }
+
+    #[test]
+    fn save_as_does_not_overwrite_an_existing_file() {
+        let path = temp_file();
+        fs::write(&path, "existing").unwrap();
+
+        let result = create_new_excalidraw_file(
+            &path,
+            r#"{"type":"excalidraw","version":2,"elements":[]}"#,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "existing");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
