@@ -243,6 +243,21 @@ fn blake3_hash(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreferencesRollbackAction {
+    Restore(serde_json::Value),
+    Delete,
+}
+
+fn preferences_rollback_action(
+    previous_value: Option<serde_json::Value>,
+) -> PreferencesRollbackAction {
+    match previous_value {
+        Some(value) => PreferencesRollbackAction::Restore(value),
+        None => PreferencesRollbackAction::Delete,
+    }
+}
+
 #[tauri::command]
 async fn save_file(file_path: String, content: String) -> Result<String, String> {
     // Validate path to prevent traversal attacks
@@ -548,14 +563,49 @@ async fn save_preferences(app: AppHandle, preferences: Preferences) -> Result<()
     use tauri_plugin_store::StoreExt;
 
     let store = app.store("preferences.json").map_err(|e| e.to_string())?;
+    let previous_preferences = store.get("preferences");
+    let preferences_value = serde_json::to_value(&preferences).map_err(|e| e.to_string())?;
 
-    store.set("preferences", serde_json::to_value(&preferences).unwrap());
-    store.save().map_err(|e| e.to_string())?;
+    store.set("preferences", preferences_value);
+    if let Err(error) = store.save() {
+        match preferences_rollback_action(previous_preferences) {
+            PreferencesRollbackAction::Restore(previous_value) => {
+                store.set("preferences", previous_value);
+            }
+            PreferencesRollbackAction::Delete => {
+                store.delete("preferences");
+            }
+        }
+
+        return Err(error.to_string());
+    }
 
     // Update recent directories menu
     let _ = menu::update_recent_directories_menu(&app, preferences.recent_directories.clone());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_rollback_action_restores_existing_value() {
+        let value = serde_json::json!({
+            "theme": "dark"
+        });
+
+        assert_eq!(
+            preferences_rollback_action(Some(value.clone())),
+            PreferencesRollbackAction::Restore(value)
+        );
+    }
+
+    #[test]
+    fn preferences_rollback_action_deletes_missing_value() {
+        assert_eq!(preferences_rollback_action(None), PreferencesRollbackAction::Delete);
+    }
 }
 
 #[tauri::command]
