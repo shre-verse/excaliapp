@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { CachedExcalidrawScene, ExcalidrawFile, FileTreeNode, OpenTab, Preferences } from '../types'
 import { convertPreferencesFromRust, convertPreferencesToRust } from '../lib/preferences'
-import { ask } from '@tauri-apps/plugin-dialog'
+import { ask, message } from '@tauri-apps/plugin-dialog'
 import { applyDocumentTheme, getEffectiveTheme, getNextExplicitTheme } from '../lib/theme'
 
 type UnsavedChangesDecision = 'save' | 'discard' | 'cancel'
@@ -104,6 +104,11 @@ function replacePathPrefix(path: string, oldPrefix: string, newPrefix: string): 
   }
 
   return path
+}
+
+async function persistPreferences(preferences: Preferences): Promise<void> {
+  const prefsToSave = convertPreferencesToRust(preferences)
+  await invoke('save_preferences', { preferences: prefsToSave })
 }
 
 interface AppStore {
@@ -822,9 +827,7 @@ export const useStore = create<AppStore>((set, get) => ({
   savePreferences: async () => {
     const { preferences } = get()
     try {
-      // Convert camelCase to snake_case for Rust backend
-      const prefsToSave = convertPreferencesToRust(preferences)
-      await invoke('save_preferences', { preferences: prefsToSave })
+      await persistPreferences(preferences)
     } catch (error) {
       console.error('Failed to save preferences:', error)
     }
@@ -890,9 +893,17 @@ export const useStore = create<AppStore>((set, get) => ({
       theme: nextTheme,
     }
 
-    set({ preferences: newPreferences })
-    applyDocumentTheme(nextTheme)
-    await get().savePreferences()
+    try {
+      await persistPreferences(newPreferences)
+      set({ preferences: newPreferences })
+      applyDocumentTheme(nextTheme)
+    } catch (error) {
+      console.error('Failed to toggle theme:', error)
+      await message(`Failed to update theme: ${error}`, {
+        title: 'Error',
+        kind: 'error',
+      })
+    }
   },
 
   // Close tab

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mockInvoke, mockMatchMedia } from '../test/setup'
+import { mockInvoke, mockMatchMedia, mockMessage } from '../test/setup'
 import { useStore } from './useStore'
 
 const initialState = useStore.getState()
@@ -100,5 +100,35 @@ describe('useStore toggleTheme', () => {
     expect(mockInvoke).toHaveBeenCalledWith('save_preferences', {
       preferences: expect.objectContaining({ theme: 'dark' }),
     })
+  })
+
+  it('keeps the existing theme when saving the new preference fails', async () => {
+    seedPreferences('dark')
+    document.documentElement.classList.add('dark')
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockInvoke.mockRejectedValueOnce(new Error('save failed'))
+
+    try {
+      await useStore.getState().toggleTheme()
+
+      expect(useStore.getState().preferences.theme).toBe('dark')
+      expect(document.documentElement).toHaveClass('dark')
+      expect(mockInvoke).toHaveBeenCalledWith('save_preferences', {
+        preferences: expect.objectContaining({ theme: 'light' }),
+      })
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to toggle theme:',
+        expect.any(Error)
+      )
+      expect(mockMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to update theme:'),
+        expect.objectContaining({
+          title: 'Error',
+          kind: 'error',
+        })
+      )
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
   })
 })
