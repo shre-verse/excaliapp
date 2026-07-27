@@ -286,19 +286,21 @@ export const useStore = create<AppStore>((set, get) => ({
             recentDirs.pop()
           }
 
-          await persistPreferences({
+          const nextPreferences = {
             ...prefs,
             lastDirectory: dir,
             recentDirectories: recentDirs,
-          })
+          }
 
           set((currentState) => ({
             preferences: {
               ...currentState.preferences,
-              lastDirectory: dir,
-              recentDirectories: recentDirs,
+              lastDirectory: nextPreferences.lastDirectory,
+              recentDirectories: nextPreferences.recentDirectories,
             },
           }))
+
+          await persistPreferences(nextPreferences)
         })
       } catch (error) {
         console.error('Failed to save recent directory preferences:', error)
@@ -913,7 +915,15 @@ export const useStore = create<AppStore>((set, get) => ({
 
   // Toggle decorations
   toggleDecorations: () => {
+    if (get().presentationMode) {
+      return
+    }
+
     enqueuePreferenceMutation(async () => {
+      if (get().presentationMode) {
+        return
+      }
+
       const newVisible = !get().preferences.showDecorations
       await invoke('set_decorations', { visible: newVisible })
       try {
@@ -922,6 +932,16 @@ export const useStore = create<AppStore>((set, get) => ({
           showDecorations: newVisible,
         })
       } catch (error) {
+        if (get().presentationMode) {
+          set((currentState) => ({
+            preferences: {
+              ...currentState.preferences,
+              showDecorations: newVisible,
+            },
+          }))
+          throw error
+        }
+
         await invoke('set_decorations', { visible: !newVisible }).catch((rollbackError) => {
           console.error(
             'Failed to restore window decorations after preference save failure:',

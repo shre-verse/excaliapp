@@ -423,10 +423,133 @@ describe('useStore toggleTheme', () => {
           sidebar_visible: true,
         }),
       })
+      expect(alertSpy).toHaveBeenCalledWith('Failed to toggle window decorations: Error: save failed')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to toggle window decorations:',
+        expect.any(Error)
+      )
     } finally {
       alertSpy.mockRestore()
       consoleErrorSpy.mockRestore()
     }
+  })
+
+  it('keeps decoration state aligned if persistence fails after presentation mode starts', async () => {
+    seedPreferences('light')
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    const firstSave = createDeferred<void>()
+    let saveAttempts = 0
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'set_decorations' || command === 'set_menu_visible') {
+        return Promise.resolve(undefined)
+      }
+
+      if (command === 'save_preferences') {
+        saveAttempts += 1
+
+        if (saveAttempts === 1) {
+          return firstSave.promise
+        }
+
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      useStore.getState().toggleDecorations()
+      await flushMicrotasks()
+
+      useStore.getState().togglePresentationMode()
+      await flushMicrotasks()
+
+      firstSave.reject(new Error('save failed'))
+      await flushMicrotasks(20)
+
+      expect(mockInvoke.mock.calls.filter(([command]) => command === 'set_decorations')).toEqual([
+        ['set_decorations', { visible: true }],
+      ])
+      expect(useStore.getState().preferences.showDecorations).toBe(true)
+
+      await useStore.getState().savePreferences()
+
+      const saveCalls = mockInvoke.mock.calls.filter(([command]) => command === 'save_preferences')
+      expect(saveCalls[1]).toEqual([
+        'save_preferences',
+        expect.objectContaining({
+          preferences: expect.objectContaining({
+            show_decorations: true,
+          }),
+        }),
+      ])
+      expect(alertSpy).toHaveBeenCalledWith('Failed to toggle window decorations: Error: save failed')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to toggle window decorations:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('ignores decoration toggles while presentation mode is active', async () => {
+    seedPreferences('light')
+    useStore.setState((state) => ({
+      presentationMode: true,
+      preferences: {
+        ...state.preferences,
+        showDecorations: false,
+      },
+    }))
+
+    useStore.getState().toggleDecorations()
+    await flushMicrotasks(10)
+
+    expect(mockInvoke).not.toHaveBeenCalled()
+    expect(useStore.getState().preferences).toEqual(
+      expect.objectContaining({
+        showDecorations: false,
+      })
+    )
+  })
+
+  it('skips a queued decoration toggle if presentation mode starts before it executes', async () => {
+    seedPreferences('light')
+    const themeSave = createDeferred<void>()
+
+    mockInvoke.mockImplementation((command, payload) => {
+      if (command === 'save_preferences') {
+        if ((payload as any).preferences.theme === 'dark') {
+          return themeSave.promise
+        }
+
+        return Promise.resolve(undefined)
+      }
+
+      if (command === 'set_menu_visible') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    const toggleThemePromise = useStore.getState().toggleTheme()
+    await flushMicrotasks()
+
+    useStore.getState().toggleDecorations()
+    useStore.getState().togglePresentationMode()
+
+    themeSave.resolve()
+    await toggleThemePromise
+    await flushMicrotasks(10)
+
+    expect(mockInvoke.mock.calls.filter(([command]) => command === 'set_decorations')).toEqual([])
+    expect(useStore.getState().presentationMode).toBe(true)
+    expect(useStore.getState().preferences.showDecorations).toBe(false)
   })
 
   it('preserves a newly opened recent directory when clear recent is already queued', async () => {
@@ -515,6 +638,70 @@ describe('useStore toggleTheme', () => {
         directory: 'D:\\work\\loaded',
       })
       expect(alertSpy).not.toHaveBeenCalled()
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to save recent directory preferences:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('keeps loaded directory preferences in memory so a later save can recover after persistence failure', async () => {
+    seedPreferences('light')
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    let saveAttempts = 0
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.resolve([])
+      }
+
+      if (command === 'save_preferences') {
+        saveAttempts += 1
+
+        if (saveAttempts === 1) {
+          return Promise.reject(new Error('save failed'))
+        }
+      }
+
+      if (command === 'watch_directory') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      await useStore.getState().loadDirectory('D:\\work\\loaded')
+
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          lastDirectory: 'D:\\work\\loaded',
+          recentDirectories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+        })
+      )
+
+      await useStore.getState().savePreferences()
+
+      const saveCalls = mockInvoke.mock.calls.filter(([command]) => command === 'save_preferences')
+      expect(saveCalls).toHaveLength(2)
+      expect(saveCalls[1]).toEqual([
+        'save_preferences',
+        expect.objectContaining({
+          preferences: expect.objectContaining({
+            last_directory: 'D:\\work\\loaded',
+            recent_directories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+          }),
+        }),
+      ])
+      expect(alertSpy).not.toHaveBeenCalled()
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to save recent directory preferences:',
+        expect.any(Error)
+      )
     } finally {
       alertSpy.mockRestore()
       consoleErrorSpy.mockRestore()
