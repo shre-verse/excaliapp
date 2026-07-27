@@ -39,3 +39,8 @@ export interface Preferences {
   sidebarVisible: boolean
   showDecorations: boolean
 }
+
+export type LoadDirectoryResult =
+  | { status: 'loaded' }
+  | { status: 'loaded_with_preference_error' }
+  | { status: 'failed' }

@@ -595,7 +595,7 @@ describe('useStore toggleTheme', () => {
     const loadDirectoryResult = await loadDirectoryPromise
     await flushMicrotasks(10)
 
-    expect(loadDirectoryResult).toBe(true)
+    expect(loadDirectoryResult).toEqual({ status: 'loaded' })
     expect(useStore.getState().preferences).toEqual(
       expect.objectContaining({
         lastDirectory: 'D:\\work\\new-dir',
@@ -634,8 +634,62 @@ describe('useStore toggleTheme', () => {
     try {
       const loadDirectoryResult = await useStore.getState().loadDirectory('D:\\work\\loaded')
 
-      expect(loadDirectoryResult).toBe(false)
+      expect(loadDirectoryResult).toEqual({ status: 'loaded_with_preference_error' })
       expect(useStore.getState().currentDirectory).toBe('D:\\work\\loaded')
+      expect(mockInvoke).toHaveBeenCalledWith('watch_directory', {
+        directory: 'D:\\work\\loaded',
+      })
+      expect(alertSpy).not.toHaveBeenCalled()
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to save recent directory preferences:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('retains lastDirectory when startup auto-load saves preferences unsuccessfully', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'get_preferences') {
+        return Promise.resolve({
+          last_directory: 'D:\\work\\loaded',
+          recent_directories: ['D:\\work\\recent'],
+          theme: 'dark',
+          sidebar_visible: true,
+          show_decorations: true,
+        })
+      }
+
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.resolve([])
+      }
+
+      if (command === 'save_preferences') {
+        return Promise.reject(new Error('save failed'))
+      }
+
+      if (command === 'watch_directory') {
+        return Promise.resolve(undefined)
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      await useStore.getState().loadPreferences()
+
+      expect(useStore.getState().currentDirectory).toBe('D:\\work\\loaded')
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          lastDirectory: 'D:\\work\\loaded',
+          recentDirectories: ['D:\\work\\loaded', 'D:\\work\\recent'],
+        })
+      )
       expect(mockInvoke).toHaveBeenCalledWith('watch_directory', {
         directory: 'D:\\work\\loaded',
       })
@@ -760,6 +814,34 @@ describe('useStore toggleTheme', () => {
       expect(alertSpy).not.toHaveBeenCalled()
     } finally {
       alertSpy.mockRestore()
+    }
+  })
+
+  it('returns failed when directory load cannot start watching or read files', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'list_excalidraw_files' || command === 'get_file_tree') {
+        return Promise.reject(new Error('missing directory'))
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      const loadDirectoryResult = await useStore.getState().loadDirectory('D:\\work\\missing')
+
+      expect(loadDirectoryResult).toEqual({ status: 'failed' })
+      expect(useStore.getState().currentDirectory).toBeNull()
+      expect(alertSpy).toHaveBeenCalledWith('Failed to load directory: Error: missing directory')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to load directory:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
     }
   })
 

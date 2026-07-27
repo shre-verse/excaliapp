@@ -1,6 +1,13 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import { CachedExcalidrawScene, ExcalidrawFile, FileTreeNode, OpenTab, Preferences } from '../types'
+import {
+  CachedExcalidrawScene,
+  ExcalidrawFile,
+  FileTreeNode,
+  LoadDirectoryResult,
+  OpenTab,
+  Preferences,
+} from '../types'
 import { convertPreferencesFromRust, convertPreferencesToRust } from '../lib/preferences'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { applyDocumentTheme, getEffectiveTheme, getNextExplicitTheme } from '../lib/theme'
@@ -158,7 +165,7 @@ interface AppStore {
   toggleTheme: () => Promise<void>
 
   // Async actions
-  loadDirectory: (dir: string) => Promise<boolean>
+  loadDirectory: (dir: string) => Promise<LoadDirectoryResult>
   loadFileTree: (dir: string) => Promise<void>
   loadFile: (file: ExcalidrawFile) => Promise<void>
   loadFileFromTree: (node: FileTreeNode) => Promise<void>
@@ -253,7 +260,6 @@ export const useStore = create<AppStore>((set, get) => ({
   loadDirectory: async (dir) => {
     try {
       const state = get()
-      let preferencesSaved = true
       const [files, fileTree] = await Promise.all([
         invoke<ExcalidrawFile[]>('list_excalidraw_files', { directory: dir }),
         invoke<FileTreeNode[]>('get_file_tree', { directory: dir })
@@ -265,6 +271,9 @@ export const useStore = create<AppStore>((set, get) => ({
         })
       }
       
+      // Start watching before committing the loaded directory to state/preferences.
+      await invoke('watch_directory', { directory: dir })
+
       set({
         currentDirectory: dir,
         files,
@@ -276,7 +285,7 @@ export const useStore = create<AppStore>((set, get) => ({
         presentationMode: false,
         openTabs: [],
       })
-      
+
       try {
         await enqueuePreferenceMutation(async () => {
           const prefs = get().preferences
@@ -303,19 +312,17 @@ export const useStore = create<AppStore>((set, get) => ({
 
           await persistPreferences(nextPreferences)
         })
+
+        return { status: 'loaded' }
       } catch (error) {
-        preferencesSaved = false
         console.error('Failed to save recent directory preferences:', error)
+        return { status: 'loaded_with_preference_error' }
       }
-      
-      // Start watching directory
-      await invoke('watch_directory', { directory: dir })
-      return preferencesSaved
     } catch (error) {
       console.error('Failed to load directory:', error)
       // Show user-friendly error message
       alert(`Failed to load directory: ${error}`)
-      return false
+      return { status: 'failed' }
     }
   },
 
@@ -821,9 +828,9 @@ export const useStore = create<AppStore>((set, get) => ({
       
       // Auto-load last directory if it exists
       if (safePrefs.lastDirectory) {
-        const didLoadLastDirectory = await get().loadDirectory(safePrefs.lastDirectory)
+        const lastDirectoryLoadResult = await get().loadDirectory(safePrefs.lastDirectory)
 
-        if (!didLoadLastDirectory) {
+        if (lastDirectoryLoadResult.status === 'failed') {
           // Clear the invalid lastDirectory from preferences
           const newPrefs = { ...get().preferences, lastDirectory: null }
           set({ preferences: newPrefs })
