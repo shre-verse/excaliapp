@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore'
 import { setGlobalExcalidrawAPI } from '../hooks/useMenuHandler'
 import { TIMING } from '../constants'
 import type { OpenTab } from '../types'
+import { getEffectiveTheme } from '../lib/theme'
 
 type ExcalidrawElement = any
 type ExcalidrawAppState = any
@@ -221,11 +222,10 @@ export function ExcalidrawEditor() {
   const openTabs = useStore(state => state.openTabs)
   const presentationMode = useStore(state => state.presentationMode)
   const preferenceTheme = useStore(state => state.preferences.theme)
-  const theme =
-    preferenceTheme === 'dark' ||
-    (preferenceTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
-      ? 'dark'
-      : 'light'
+  const theme = getEffectiveTheme(
+    preferenceTheme,
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  )
 
   if (!activeFile) {
     return (
