@@ -327,6 +327,12 @@ describe('useStore toggleTheme', () => {
     decorationChange.resolve()
     await flushMicrotasks()
 
+    expect(useStore.getState().preferences).toEqual(
+      expect.objectContaining({
+        theme: 'dark',
+        showDecorations: true,
+      })
+    )
     expect(mockInvoke).toHaveBeenNthCalledWith(3, 'save_preferences', {
       preferences: expect.objectContaining({
         theme: 'dark',
@@ -371,10 +377,11 @@ describe('useStore toggleTheme', () => {
     expect(useStore.getState().preferences.showDecorations).toBe(false)
   })
 
-  it('rolls back decorations when persistence fails and continues processing queued saves', async () => {
+  it('restores in-memory decorations after persistence fails and rollback succeeds', async () => {
     seedPreferences('light')
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    const decorationSave = createDeferred<void>()
     let saveAttempts = 0
 
     mockInvoke.mockImplementation((command) => {
@@ -386,7 +393,7 @@ describe('useStore toggleTheme', () => {
         saveAttempts += 1
 
         if (saveAttempts === 1) {
-          return Promise.reject(new Error('save failed'))
+          return decorationSave.promise
         }
       }
 
@@ -395,6 +402,14 @@ describe('useStore toggleTheme', () => {
 
     try {
       useStore.getState().toggleDecorations()
+      await flushMicrotasks(20)
+
+      expect(useStore.getState().preferences).toEqual(
+        expect.objectContaining({
+          showDecorations: true,
+        })
+      )
+
       useStore.setState((state) => ({
         preferences: {
           ...state.preferences,
@@ -403,6 +418,7 @@ describe('useStore toggleTheme', () => {
       }))
       const savePromise = useStore.getState().savePreferences()
 
+      decorationSave.reject(new Error('save failed'))
       await flushMicrotasks(20)
       await savePromise
 
@@ -426,6 +442,53 @@ describe('useStore toggleTheme', () => {
       expect(alertSpy).toHaveBeenCalledWith('Failed to toggle window decorations: Error: save failed')
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         'Failed to toggle window decorations:',
+        expect.any(Error)
+      )
+    } finally {
+      alertSpy.mockRestore()
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
+  it('keeps in-memory decorations aligned when persistence and rollback both fail', async () => {
+    seedPreferences('light')
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    let decorationAttempts = 0
+
+    mockInvoke.mockImplementation((command) => {
+      if (command === 'set_decorations') {
+        decorationAttempts += 1
+
+        if (decorationAttempts === 1) {
+          return Promise.resolve(undefined)
+        }
+
+        return Promise.reject(new Error('rollback failed'))
+      }
+
+      if (command === 'save_preferences') {
+        return Promise.reject(new Error('save failed'))
+      }
+
+      return Promise.resolve(undefined)
+    })
+
+    try {
+      useStore.getState().toggleDecorations()
+      await flushMicrotasks(20)
+
+      expect(mockInvoke.mock.calls.filter(([command]) => command === 'set_decorations')).toEqual([
+        ['set_decorations', { visible: true }],
+        ['set_decorations', { visible: false }],
+      ])
+      expect(useStore.getState().preferences.showDecorations).toBe(true)
+
+      const [message] = alertSpy.mock.calls[alertSpy.mock.calls.length - 1] ?? ['']
+      expect(message).toContain('save failed')
+      expect(message).toContain('rollback failed')
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to restore window decorations after preference save failure:',
         expect.any(Error)
       )
     } finally {

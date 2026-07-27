@@ -118,6 +118,10 @@ async function persistPreferences(preferences: Preferences): Promise<void> {
   await invoke('save_preferences', { preferences: prefsToSave })
 }
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 let preferenceMutationQueue: Promise<void> = Promise.resolve()
 
 function enqueuePreferenceMutation<T>(mutation: () => Promise<T>): Promise<T> {
@@ -934,39 +938,44 @@ export const useStore = create<AppStore>((set, get) => ({
         return
       }
 
-      const newVisible = !get().preferences.showDecorations
+      const previousVisible = get().preferences.showDecorations
+      const newVisible = !previousVisible
       await invoke('set_decorations', { visible: newVisible })
-      try {
-        await persistPreferences({
-          ...get().preferences,
-          showDecorations: newVisible,
-        })
-      } catch (error) {
-        if (get().presentationMode) {
-          set((currentState) => ({
-            preferences: {
-              ...currentState.preferences,
-              showDecorations: newVisible,
-            },
-          }))
-          throw error
-        }
-
-        await invoke('set_decorations', { visible: !newVisible }).catch((rollbackError) => {
-          console.error(
-            'Failed to restore window decorations after preference save failure:',
-            rollbackError
-          )
-        })
-        throw error
-      }
-
       set((currentState) => ({
         preferences: {
           ...currentState.preferences,
           showDecorations: newVisible,
         },
       }))
+
+      try {
+        await persistPreferences(get().preferences)
+      } catch (error) {
+        if (get().presentationMode) {
+          throw error
+        }
+
+        try {
+          await invoke('set_decorations', { visible: previousVisible })
+          set((currentState) => ({
+            preferences: {
+              ...currentState.preferences,
+              showDecorations: previousVisible,
+            },
+          }))
+        } catch (rollbackError) {
+          console.error(
+            'Failed to restore window decorations after preference save failure:',
+            rollbackError
+          )
+          throw new Error(
+            `Failed to save decoration preference: ${describeError(error)}. ` +
+            `Failed to restore window decorations: ${describeError(rollbackError)}`
+          )
+        }
+
+        throw error
+      }
     })
       .catch((error) => {
         console.error('Failed to toggle window decorations:', error)
