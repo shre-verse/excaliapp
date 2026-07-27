@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { CachedExcalidrawScene, ExcalidrawFile, FileTreeNode, OpenTab, Preferences } from '../types'
 import { convertPreferencesFromRust, convertPreferencesToRust } from '../lib/preferences'
 import { ask } from '@tauri-apps/plugin-dialog'
+import { applyDocumentTheme, getEffectiveTheme, getNextExplicitTheme } from '../lib/theme'
 
 type UnsavedChangesDecision = 'save' | 'discard' | 'cancel'
 type FileLoadSource = 'cache' | 'disk' | null
@@ -134,6 +135,7 @@ interface AppStore {
   togglePresentationMode: () => void
   closeTab: (filePath: string) => Promise<void>
   toggleDecorations: () => void
+  toggleTheme: () => Promise<void>
 
   // Async actions
   loadDirectory: (dir: string) => Promise<void>
@@ -774,21 +776,12 @@ export const useStore = create<AppStore>((set, get) => ({
         invoke('set_decorations', { visible: false })
       }
 
-      // Apply theme
-      const root = document.documentElement
-      if (safePrefs.theme === 'dark') {
-        root.classList.add('dark')
-      } else if (safePrefs.theme === 'light') {
-        root.classList.remove('dark')
-      } else {
-        // System theme
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-        if (prefersDark) {
-          root.classList.add('dark')
-        } else {
-          root.classList.remove('dark')
-        }
-      }
+      applyDocumentTheme(
+        getEffectiveTheme(
+          safePrefs.theme,
+          window.matchMedia('(prefers-color-scheme: dark)').matches
+        )
+      )
       
       // Auto-load last directory if it exists
       if (safePrefs.lastDirectory) {
@@ -816,6 +809,12 @@ export const useStore = create<AppStore>((set, get) => ({
         preferences: defaultPrefs,
         sidebarVisible: true,
       })
+      applyDocumentTheme(
+        getEffectiveTheme(
+          defaultPrefs.theme,
+          window.matchMedia('(prefers-color-scheme: dark)').matches
+        )
+      )
     }
   },
 
@@ -877,6 +876,23 @@ export const useStore = create<AppStore>((set, get) => ({
         console.error('Failed to toggle window decorations:', error)
         alert(`Failed to toggle window decorations: ${error}`)
       })
+  },
+
+  toggleTheme: async () => {
+    const state = get()
+    const nextTheme = getNextExplicitTheme(
+      state.preferences.theme,
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+    )
+
+    const newPreferences = {
+      ...state.preferences,
+      theme: nextTheme,
+    }
+
+    set({ preferences: newPreferences })
+    applyDocumentTheme(nextTheme)
+    await get().savePreferences()
   },
 
   // Close tab
